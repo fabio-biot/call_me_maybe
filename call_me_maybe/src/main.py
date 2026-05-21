@@ -1,183 +1,181 @@
-from llm_sdk import Small_LLM_Model
-import sys
 import json
+import sys
+from pathlib import Path
+from typing import Any
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from llm_sdk import Small_LLM_Model  # noqa: E402
+
+FUNCTIONS_PATH = PROJECT_ROOT / "data" / "input" / "functions_definition.json"
 
 
-def is_valid_json_prefix(text: str) -> bool:
-    stack = 0
-    in_string = False
-    for i, c in enumerate(text):
-        if c == '"' and (i == 0 or text[i-1] != "\\"):
-            in_string = not in_string
-        if not in_string:
-            if c == "{":
-                stack += 1
-            elif c == "}":
-                stack -= 1
-                if stack < 0:
-                    return False
-    return True
+def load_functions(path: Path = FUNCTIONS_PATH) -> list[dict[str, Any]]:
+    with path.open("r") as f:
+        return json.load(f)
 
 
-def allowed_chars(state):
-    if state == "START":
-        return set("{")
-    if state == "KEY":
-        return set('"abcdefghijklmnopqrstuvwxyz_')
-    if state == "AFTER_KEY":
-        return set(": ")
-    if state == "VALUE":
-        return set('"abcdefghijklmnopqrstuvwxyz_ ')
-    if state == "END":
-        return set("}")
-    return set()
+def encode_function_names(
+    functions: list[dict[str, Any]],
+    model: Small_LLM_Model,
+) -> dict[str, list[int]]:
+    encoded = {}
 
-def next_state(state, char):
-    if state == "START":
-        if char == "{":
-            return "KEY"
-    if state == "KEY":
-        if char == '"':
-            return "AFTER_KEY"
-    if state == "AFTER_KEY":
-        if char == ":":
-            return "VALUE"
-    if state == "VALUE":
-        if char == '"':
-            return "END"
-    if state == "END":
-        if char == "}":
-            return "DONE"
-    return None
+    for function in functions:
+        name = function["name"]
+        encoded[name] = model.encode(name)[0].tolist()
+
+    return encoded
 
 
-def select_token(model, tokens, logits, state):
-    logits = logits[-1] if isinstance(logits[0], list) else logits
-    top = sorted(enumerate(logits), key=lambda x: x[1], reverse=True)
-    for token_id, _ in top[:50]:
-        candidate = tokens + [token_id]
-        text = model.decode(candidate)
-        if len(text) == 0:
+def get_valid_next_tokens(
+    encoded_functions: dict[str, list[int]],
+    generated_tokens: list[int],
+) -> dict[int, str]:
+    valid = {}
+
+    for name, tokens in encoded_functions.items():
+        if tokens[: len(generated_tokens)] != generated_tokens:
             continue
-        last_char = text[-1]
-        print(state)
-        print(text)
-        new_state = next_state(state, last_char)
-        if new_state is not None:
-            return token_id, new_state
-    return None, state
+
+        if len(generated_tokens) == len(tokens):
+            continue
+
+        valid[tokens[len(generated_tokens)]] = name
+
+    return valid
 
 
-def generate_json(model, prompt, max_steps=10):
-    tokens = model.encode('{"Question Description":"')[0].tolist()
-    state = "KEY"
-    for _ in range(max_steps):
-        logits = model.get_logits_from_input_ids(tokens)
-        token, state = select_token(model, tokens, logits, state)
-        if token is None or state == "DONE":
-            break
-        tokens.append(token)
-    return model.decode(tokens)
-
-def read_json():
-    i = 0
-    functions = []
-    with open("data/input/functions_definition.json", "r") as f:
-        json_d = json.load(f)
-    # print(json_d)
-    functions.append(json_d[0]['name'])
-    while i != len(json_d):
-        # print(json_d[i]['name'])
-        functions.append(json_d[i]['name'])
-        # (json_d[i]['name'])
-        i += 1
-    return functions
-
-def encode_functions(availiable_funcs: list[str], model: Small_LLM_Model):
-    encoded_funcs = {}
-    for name in availiable_funcs:
-        encoded_funcs[name] = model.encode(name)[0].tolist()
-    return encoded_funcs
-
-def score_function(model, prompt_tokens, func_tokens):
-    tokens = prompt_tokens.copy()
-    score = 0.0
-
-    for t in func_tokens:
-        logits = model.get_logits_from_input_ids(tokens)
-        last_logits = logits[-1]
-
-        score += float(last_logits[t])
-
-        tokens.append(t)
-
-    return score / len(func_tokens)
-
-def select_best_function(prompt_tokens, func_map, model):
-    best_score = -1e9
-    best_func = None
-
-    for name, tokens in func_map.items():
-        score = score_function(model, prompt_tokens, tokens)
-        print(f"{score} - ")
-        logits = model.get_logits_from_input_ids(tokens)
-        print("LOGITS TYPE:", type(logits))
-        print("LOGITS VALUE:", logits[:10])
-        if best_func is None or score > best_score:
-            best_score = score
-            best_func = name
-
-    return best_func
-
-basejson  = {
-  "prompt": "...",
-  "name": "fn_add_numbers",
-  "parameters": {
-    "a": 2,
-    "b": 3
-  }
-}
-def complete_json(base: dict, prompt: str):
-    base['prompt'] = prompt
-    print(base)
-
-def is_complete_json(text: str) -> bool:
-    try:
-        json.loads(text)
-        return True
-    except:
-        return False
-
-
-def main():
-    print("Hello from call-me-maybe!")
-    model = Small_LLM_Model()
-    functions = read_json()
-    prompt = sys.argv[1]
+def constrained_function_generation(
+    model: Small_LLM_Model,
+    prompt: str,
+    encoded_functions: dict[str, list[int]],
+) -> str | None:
     context = f"""
-    User request:
-    {prompt}
-    Available functions:
-    """
-    for func in functions:
-        context += f"- {func}\n"
+User request:
+{prompt}
+
+Available functions:
+"""
+    for name in encoded_functions:
+        context += f"- {name}\n"
     context += "\nBest function:\n"
 
-    if len(sys.argv) < 2:
-        print("Usage: uv run python -m main \"<prompt>\"")
-        return
-
-    func_map = encode_functions(functions, model)
     prompt_tokens = model.encode(context)[0].tolist()
-    best_func = select_best_function(prompt_tokens, func_map, model)
-    result = {
+    generated_tokens: list[int] = []
+
+    while True:
+        valid_next_tokens = get_valid_next_tokens(
+            encoded_functions,
+            generated_tokens,
+        )
+        if not valid_next_tokens:
+            return None
+
+        logits = model.get_logits_from_input_ids(
+            prompt_tokens + generated_tokens,
+        )
+        best_token = max(valid_next_tokens, key=lambda token: logits[token])
+        generated_tokens.append(best_token)
+
+        for name, tokens in encoded_functions.items():
+            if generated_tokens == tokens:
+                return name
+
+
+def extract_numbers(prompt: str) -> list[float]:
+    numbers = []
+    current = ""
+
+    for char in prompt:
+        if char.isdigit():
+            current += char
+            continue
+
+        if current:
+            numbers.append(float(current))
+            current = ""
+
+    if current:
+        numbers.append(float(current))
+
+    return numbers
+
+
+def extract_strings(prompt: str, selected_function: str | None) -> list[str]:
+    if selected_function == "fn_greet":
+        return [prompt.strip().split(" ")[-1]]
+
+    strings = []
+    words = prompt.replace("'", '"').split('"')
+    for index in range(1, len(words), 2):
+        strings.append(words[index])
+
+    return strings
+
+
+def build_parameters_from_schema(
+    functions: list[dict[str, Any]],
+    selected_function: str | None,
+    prompt: str,
+) -> dict[str, float | str]:
+    for function in functions:
+        if function["name"] != selected_function:
+            continue
+
+        result = {}
+        numbers = extract_numbers(prompt)
+        strings = extract_strings(prompt, selected_function)
+        number_index = 0
+        string_index = 0
+
+        for parameter_name, parameter_info in function.get("parameters", {}).items():
+            parameter_type = parameter_info["type"]
+
+            if parameter_type == "number" and number_index < len(numbers):
+                result[parameter_name] = numbers[number_index]
+                number_index += 1
+
+            if parameter_type == "string" and string_index < len(strings):
+                result[parameter_name] = strings[string_index]
+                string_index += 1
+
+        return result
+
+    return {}
+
+
+def build_function_call(prompt: str, model: Small_LLM_Model) -> dict[str, Any]:
+    functions = load_functions()
+    encoded_functions = encode_function_names(functions, model)
+    selected_function = constrained_function_generation(
+        model,
+        prompt,
+        encoded_functions,
+    )
+
+    return {
         "prompt": prompt,
-        "name": best_func,
-        "parameters": {}
+        "name": selected_function,
+        "parameters": build_parameters_from_schema(
+            functions,
+            selected_function,
+            prompt,
+        ),
     }
 
+
+def main() -> None:
+    if len(sys.argv) < 2:
+        print('Usage: uv run python main.py "sum of 4 and 5"')
+        return
+
+    model = Small_LLM_Model()
+    result = build_function_call(sys.argv[1], model)
     print(json.dumps(result, indent=2))
 
-    
+
 if __name__ == "__main__":
     main()
