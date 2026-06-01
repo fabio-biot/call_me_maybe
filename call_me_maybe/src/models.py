@@ -20,4 +20,3 @@ class FunctionCall(BaseModel):
     name: str
     prompt: str
     parameters: dict[str, str]
-
