@@ -163,6 +163,5 @@ Example output:
 ### AI Usage
 
 AI was used to help structure the README, summarize the subject requirements, and
-clarify wording around constrained decoding, testing, and usage commands. The code,
-algorithm, and final behavior must still be reviewed, tested, and understood by the
-student before evaluation.
+clarify wording around constrained decoding, testing, and usage commands, and for the regex, Thing I don't vompletely master today,
+but I've seen how powerful and efficient it can be.
