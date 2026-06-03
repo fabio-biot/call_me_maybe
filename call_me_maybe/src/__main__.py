@@ -1,4 +1,5 @@
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -11,10 +12,19 @@ if not FUNCTIONS_PATH.exists():
     raise FileNotFoundError(FUNCTIONS_PATH)
 
 
+def read_json_file(path: Path) -> Any:
+    try:
+        with path.open("r", encoding="utf-8") as file:
+            return json.load(file)
+    except FileNotFoundError as error:
+        raise ValueError(f"missing file: {path}") from error
+    except json.JSONDecodeError as error:
+        raise ValueError(f"invalid JSON in {path}: {error}") from error
+
+
 def load_functions(
-        path: Path = FUNCTIONS_PATH) -> list[dict[str, str | float]]:
-    with path.open("r") as f:
-        return json.load(f)
+        path: Path = FUNCTIONS_PATH) -> list[dict[str, Any]]:
+    return read_json_file(path)
 
 
 def decode_tokens(tokens: list[int], model: Small_LLM_Model) -> str:
@@ -39,16 +49,12 @@ def get_valid_next_tokens(
     generated_tokens: list[int],
 ) -> dict[int, str]:
     valid = {}
-
     for name, tokens in encoded_functions.items():
         if tokens[: len(generated_tokens)] != generated_tokens:
             continue
-
         if len(generated_tokens) == len(tokens):
             continue
-
         valid[tokens[len(generated_tokens)]] = name
-
     return valid
 
 
@@ -66,11 +72,8 @@ Available functions:
     for name in encoded_functions:
         context += f"- {name}\n"
     context += "\nBest function:\n"
-
     prompt_tokens = model.encode(context)[0].tolist()
-
     generated_tokens: list[int] = []
-
     while True:
         valid_next_tokens = get_valid_next_tokens(
             encoded_functions,
@@ -91,25 +94,14 @@ Available functions:
 
 
 def extract_numbers(prompt: str) -> list[float]:
-    numbers = []
-    current = ""
-
-    for char in prompt:
-        if char.isdigit():
-            current += char
-            continue
-
-        if current:
-            numbers.append(float(current))
-            current = ""
-
-    if current:
-        numbers.append(float(current))
-
-    return numbers
+    matches = re.findall(r"[-+]?\d+(?:\.\d+)?", prompt)
+    return [float(match) for match in matches]
 
 
-def extract_strings(prompt: str, selected_function: str | None) -> list[str]:
+def extract_strings(
+    prompt: str,
+    selected_function: str | None = None,
+) -> list[str]:
     if selected_function == "fn_greet":
         return [prompt.strip().split(" ")[-1]]
 
@@ -119,6 +111,36 @@ def extract_strings(prompt: str, selected_function: str | None) -> list[str]:
         strings.append(words[index])
 
     return strings
+
+# def extract_numbers(prompt: str) -> list[float]:
+#     numbers = []
+#     current = ""
+
+#     for char in prompt:
+#         if char.isdigit():
+#             current += char
+#             continue
+
+#         if current:
+#             numbers.append(float(current))
+#             current = ""
+
+#     if current:
+#         numbers.append(float(current))
+
+#     return numbers
+
+
+# def extract_strings(prompt: str, selected_function: str | None) -> list[str]:
+#     if selected_function == "fn_greet":
+#         return [prompt.strip().split(" ")[-1]]
+
+#     strings = []
+#     words = prompt.replace("'", '"').split('"')
+#     for index in range(1, len(words), 2):
+#         strings.append(words[index])
+
+#     return strings
 
 
 def build_parameters_from_schema(
@@ -143,7 +165,7 @@ def build_parameters_from_schema(
 
             if param_type == "number" and number_index < len(numbers):
                 result[param_name] = float(numbers[number_index])
-                print(type(numbers[number_index]))
+                # print(type(numbers[number_index]))
                 number_index += 1
 
             if param_type == "string" and string_index < len(strings):
@@ -177,10 +199,10 @@ def build_function_call(
 
 
 def main() -> None:
-    if len(sys.argv) < 2 or len(sys.argv) > 2:
-        print('Usage: uv run python main.py "sum of 4 and 5"')
-        print('Usage: "uv run python main.py" and the prompt')
-        return
+    if len(sys.argv) == 1 or sys.argv[1].startswith("--"):
+        from .batch_runner import parse_args, run_batch
+
+        raise SystemExit(run_batch(parse_args()))
 
     model = Small_LLM_Model()
     result = build_function_call(sys.argv[1], model)

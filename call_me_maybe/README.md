@@ -1,10 +1,14 @@
-*This project has been created as part of the 42 curriculum by \<login\>.*
+*This project has been created as part of the 42 curriculum by fchaput.*
 
-# Call Me Maybe — Introduction to Function Calling in LLMs
+# Call Me Maybe - Introduction to Function Calling in LLMs
 
 ## Description
 
-**Call Me Maybe** turns natural-language requests into structured function calls. For *"What is the sum of 2 and 3?"* it returns the function name and typed arguments—not the numeric answer:
+Call Me Maybe translates natural-language prompts into structured function calls.
+Instead of answering a request directly, the program selects the best function name and
+extracts typed parameters from the prompt.
+
+Example:
 
 ```json
 {
@@ -14,117 +18,128 @@
 }
 ```
 
-The tool uses [Qwen/Qwen3-0.6B](https://huggingface.co/Qwen/Qwen3-0.6B) via `llm_sdk`. **Function selection** uses **constrained decoding** (only token IDs that extend a valid function-name prefix; highest logit among valid IDs). **Parameters** are filled from the prompt per `functions_definition.json`.
+The project uses `llm_sdk.Small_LLM_Model` with `Qwen/Qwen3-0.6B`. Function
+selection is done with constrained decoding: at each generation step, only tokens that
+can still complete a valid function name are allowed.
 
 ## Instructions
-
-### Prerequisites
-
-- Python 3.10+ (3.12 in `.python-version` at repo root)
-- [uv](https://docs.astral.sh/uv/)
-- Internet on first run (model download)
 
 ### Installation
 
 ```bash
-cd src
 uv sync
 ```
 
-From repo root: `make install`.
+or:
+
+```bash
+make install
+```
 
 ### Running the program
 
 ```bash
-cd src
 uv run python -m src \
-  --functions_definition ../data/input/functions_definition.json \
-  --input ../data/input/function_calling_tests.json \
-  --output ../data/output/function_calling_results.json
+  --functions_definition data/input/functions_definition.json \
+  --input data/input/function_calling_tests.json \
+  --output data/output/function_calling_results.json
 ```
 
-| Argument | Default (repo root) |
-|----------|---------------------|
+Default paths:
+
+| Argument | Default |
+| --- | --- |
 | `--functions_definition` | `data/input/functions_definition.json` |
 | `--input` | `data/input/function_calling_tests.json` |
 | `--output` | `data/output/function_calling_results.json` |
 
-Do not commit `data/output/`.
-
-**Single prompt (dev):**
-
-```bash
-uv run python main.py "What is the sum of 2 and 3?"
-```
+Do not commit `data/output/`; it is generated when the program runs.
 
 ### Makefile
 
 | Target | Action |
-|--------|--------|
-| `install` | `uv sync` |
-| `run` | `uv run python -m src $(ARGS)` |
-| `debug` | `uv run python -m pdb -m src` |
-| `clean` | Remove `__pycache__` |
-| `lint` | `flake8 .` + `mypy .` (subject flags) |
+| --- | --- |
+| `install` | Install dependencies with `uv sync` |
+| `run` | Run `uv run python -m src $(ARGS)` |
+| `debug` | Run the program with `pdb` |
+| `clean` | Remove Python caches |
+| `lint` | Run `flake8` and `mypy` |
+
+## Algorithm
+
+1. Load the available function definitions from JSON.
+2. Encode every function name once with the model tokenizer.
+3. Build a prompt containing the user request and the list of available functions.
+4. Generate the function name token by token.
+5. At each step, compute the valid next token IDs from the encoded function names.
+6. Read model logits with `get_logits_from_input_ids`.
+7. Pick the highest-logit token only among the valid token IDs.
+8. Stop when the generated token sequence exactly matches a function name.
+9. Extract parameters from the prompt according to the selected function schema.
+10. Write a JSON array containing `prompt`, `name`, and `parameters`.
+
+Invalid function-name tokens are never selected, which keeps the generated function
+name constrained to the provided schema.
+
+## Design Decisions
+
+- Function selection uses the LLM logits, not keyword matching.
+- Constrained decoding is applied to function names because they are a finite set of
+  valid token sequences.
+- Parameter extraction is handled separately from function selection to keep the output
+  JSON predictable.
+- Input and output files are JSON files so they can be validated easily.
+- Pydantic models are used to document and validate structured data.
+- The implementation only uses public methods from `llm_sdk`.
+
+## Performance Analysis
+
+Expected behavior:
+
+| Goal | Target |
+| --- | --- |
+| JSON validity | 100% parseable output |
+| Function selection | 90%+ on clear prompts |
+| Runtime | Under 5 minutes for the provided batch |
+| Reliability | Graceful handling of missing or invalid files |
+
+Constrained decoding improves reliability because the model cannot generate a function
+name outside the available definitions. The weakest part is parameter extraction, because
+natural language can contain ambiguous strings, numbers, or regex instructions.
+
+## Challenges Faced
+
+- Small LLMs are unreliable when asked to freely generate JSON.
+- Tokenized function names may share prefixes, so valid next-token filtering must be
+  done from token sequences, not raw strings.
+- Parameters must match the schema exactly, including argument names and types.
+- File paths and generated output must remain compatible with the correction command.
+
+## Testing Strategy
+
+1. Run `make lint` to check `flake8` and `mypy`.
+2. Run the program with the default input files.
+3. Check that `data/output/function_calling_results.json` is valid JSON.
+4. Verify that every object contains exactly `prompt`, `name`, and `parameters`.
+5. Compare selected function names and parameter types against
+   `functions_definition.json`.
+6. Test edge cases: missing files, invalid JSON, empty prompts, decimal numbers, quoted
+   strings, and multi-parameter functions.
+
+## Example Usage
 
 ```bash
-cd src
-uv run flake8 ..
-uv run mypy .. --warn-return-any --warn-unused-ignores --ignore-missing-imports --disallow-untyped-defs --check-untyped-defs
+uv run python -m src
 ```
 
-`uv lint` does not exist—use `make lint` or `uv run flake8` / `uv run mypy`.
-
-## Algorithm: constrained decoding
-
-1. Encode each function `name` once with `model.encode()`.
-2. Build context: user request + function list + `Best function:\n` → `prompt_tokens`.
-3. Loop: collect next token IDs that extend a valid name prefix; if none, fail. Call `get_logits_from_input_ids(prompt_tokens + generated_tokens)`. Pick **max logit** among allowed IDs only. Append until a full name matches.
-4. Extract `parameters` from the prompt per schema (`number`, `string`, …).
-
-Invalid tokens are never chosen (equivalent to logits −∞).
-
-## Design decisions
-
-- Constrain **names** (finite token sequences) before full JSON generation.
-- Greedy argmax on valid logits.
-- Parameters parsed from NL separately; Pydantic in `models.py`.
-- Public `llm_sdk` API only (`encode`, `get_logits_from_input_ids`, …).
-
-## Performance analysis
-
-| Goal | Target | Notes |
-|------|--------|-------|
-| Valid JSON | 100% | Keys: `prompt`, `name`, `parameters`. |
-| Selection | 90%+ | Structural constraint on names. |
-| Speed | &lt; 5 min batch | One forward pass per name token. |
-
-Parameter heuristics may fail on edge cases.
-
-## Challenges faced
-
-- Unreliable free-form JSON from small models → prefix-constrained names.
-- Shared token prefixes → disambiguation by logits.
-- Parameter extraction from free text.
-- Use `uv run` for lint if tools are not on PATH.
-
-## Testing strategy
-
-1. Inputs in `data/input/`.
-2. Run batch command; check `function_calling_results.json`.
-3. Validate keys, types, required parameters.
-4. Edge cases and malformed inputs (graceful errors).
-5. Lint before submit.
-
-## Example usage
-
 ```bash
-cd src && uv sync
 uv run python -m src \
-  --functions_definition ../data/input/functions_definition.json \
-  --input ../data/input/function_calling_tests.json \
-  --output ../data/output/function_calling_results.json
+  --functions_definition data/input/functions_definition.json \
+  --input data/input/function_calling_tests.json \
+  --output data/output/function_calling_results.json
 ```
+
+Example output:
 
 ```json
 [
@@ -136,18 +151,18 @@ uv run python -m src \
 ]
 ```
 
-```bash
-uv run python main.py "Greet john"
-```
-
 ## Resources
 
-- [uv](https://docs.astral.sh/uv/)
-- [Qwen3-0.6B](https://huggingface.co/Qwen/Qwen3-0.6B)
-- [Transformers generation](https://huggingface.co/docs/transformers/en/generation_strategies)
-- [PEP 257](https://peps.python.org/pep-0257/)
-- `instructions.txt` (repo root)
+- [uv documentation](https://docs.astral.sh/uv/)
+- [Qwen/Qwen3-0.6B](https://huggingface.co/Qwen/Qwen3-0.6B)
+- [Pydantic documentation](https://docs.pydantic.dev/)
+- [PEP 257 - Docstring Conventions](https://peps.python.org/pep-0257/)
+- `llm_sdk` package provided with the project
+- Project subject: constrained decoding and function calling requirements
 
-### AI usage
+### AI Usage
 
-AI may help with README structure and tooling explanations. You must understand and defend constrained decoding, parameter logic, and evaluation changes. Replace `\<login\>` before submission.
+AI was used to help structure the README, summarize the subject requirements, and
+clarify wording around constrained decoding, testing, and usage commands. The code,
+algorithm, and final behavior must still be reviewed, tested, and understood by the
+student before evaluation.

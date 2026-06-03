@@ -9,6 +9,7 @@ debug:
 
 clean:
 	find . -name "__pycache__" -type d -prune -exec rm -rf {} +
+	find . -name ".mypy_cache" -type d -prune -exec rm -rf {} +
 
 lint:
 	flake8 . --exclude=.venv,__pycache__,.mypy_cache,.pytest_cache,llm_sdk
